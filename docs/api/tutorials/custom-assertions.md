@@ -6,6 +6,10 @@ import TabItem from '@theme/TabItem';
 This guide specifically covers how to create and report results for custom assertions in DataHub.
 Custom Assertions are those not natively run or directly modeled by DataHub, and managed by a 3rd party framework or tool.
 
+**CUSTOM is the only supported assertion type for external / self-reported checks** (dbt, Great Expectations, partner tools, SDK integrations).
+Do not emit native typed models (`FIELD`, `VOLUME`, `FRESHNESS`, `DATA_SCHEMA`, `SQL`) for externally managed assertions — those are intended for assertions DataHub evaluates / schedules natively.
+The legacy `DATASET` / `DatasetAssertionInfo` shape is deprecated; new writers should use `CUSTOM` with optional structured fields on `CustomAssertionInfo` (scope, operator, aggregation, parameters, fields, nativeType).
+
 To create _native_ assertions using the API (e.g. for DataHub to manage), please refer to the [Assertions API](./assertions.md).
 
 This guide may be used as reference for partners seeking to integrate their own monitoring tools with DataHub.
@@ -44,8 +48,13 @@ mutation upsertCustomAssertion {
       platform: {
         urn: "urn:li:dataPlatform:great-expectations" # OR you can provide name: "My Custom Platform" if you do not have an URN for the platform.
       }
-      fieldPath: "field_foo" # Optional: if you want to associated with a specific field,
+      fieldPaths: ["field_foo"] # Optional: columns associated with the assertion. Prefer this over singular fieldPath.
       externalUrl: "https://my-monitoring-tool.com/result-for-this-assertion" # Optional: if you want to provide a link to the monitoring tool
+      # Optional structured display fields (migrated from legacy DatasetAssertionInfo):
+      scope: DATASET_COLUMN
+      operator: NOT_NULL
+      aggregation: IDENTITY
+      nativeType: "expect_column_values_to_not_be_null"
       # Optional: If you want to provide a custom SQL query for the assertion. This will be rendered as a query in the UI.
       # logic: "SELECT * FROM X WHERE Y"
     }
@@ -61,12 +70,12 @@ Note that you can either provide a unique `urn` for the assertion, which will be
 
 or a random urn will be created and returned for you. This id should be stable over time and unique for each assertion.
 
-The upsert API will return the unique identifier (URN) for the the assertion if you were successful:
+The upsert API will return the unique identifier (URN) for the assertion if you were successful:
 
 ```json
 {
   "data": {
-    "upsertExternalAssertion": {
+    "upsertCustomAssertion": {
       "urn": "urn:li:assertion:your-new-assertion-id"
     }
   },
@@ -78,10 +87,16 @@ The upsert API will return the unique identifier (URN) for the the assertion if 
 
 <TabItem value="python" label="Python">
 
-To upsert an assertion in Python, simply use the `upsert_external_assertion` method on the DataHub Client object.
+To upsert an assertion in Python, use `DataHubGraph.upsert_custom_assertion` or the V2 SDK helper
+`client.assertions.sync_custom_assertion` (recommended for partners). Report run results with
+`report_assertion_result` / `client.assertions.report_assertion_result`.
 
 ```python
 {{ inline /metadata-ingestion/examples/library/upsert_custom_assertion.py show_path_as_comment }}
+```
+
+```python
+{{ inline /metadata-ingestion/examples/library/sync_custom_assertion.py show_path_as_comment }}
 ```
 
 </TabItem>
