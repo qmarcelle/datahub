@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Iterator
@@ -33,7 +32,6 @@ from great_expectations.execution_engine.sqlalchemy_execution_engine import (
 from great_expectations.validator.validator import Validator
 from pyspark.sql import SparkSession
 
-from datahub.emitter.aspect import JSON_PATCH_CONTENT_TYPE
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.metadata.schema_classes import (
     AssertionInfoClass,
@@ -43,15 +41,15 @@ from datahub.metadata.schema_classes import (
     AssertionRunEventClass,
     AssertionRunStatusClass,
     AssertionScopeClass,
+    AssertionSourceClass,
+    AssertionSourceTypeClass,
     AssertionStdParameterClass,
     AssertionStdParametersClass,
     AssertionTypeClass,
     AuditStampClass,
     BatchSpecClass,
-    ChangeTypeClass,
+    CustomAssertionInfoClass,
     DataPlatformInstanceClass,
-    DatasetAssertionInfoClass,
-    MetadataChangeProposalClass,
     PartitionSpecClass,
 )
 from datahub_gx_plugin.action import DataHubValidationAction
@@ -385,11 +383,15 @@ def test_DataHubValidationAction_sqlalchemy(
                     entityUrn="urn:li:assertion:8f25f50da43bf7434137dd5ab6fbdb09",
                     aspectName="assertionInfo",
                     aspect=AssertionInfoClass(
-                        type=AssertionTypeClass.DATASET,
+                        type=AssertionTypeClass.CUSTOM,
                         customProperties={"expectation_suite_name": "asset.default"},
-                        datasetAssertion=DatasetAssertionInfoClass(
+                        source=AssertionSourceClass(
+                            type=AssertionSourceTypeClass.EXTERNAL
+                        ),
+                        customAssertion=CustomAssertionInfoClass(
+                            type="greatExpectations",
+                            entity="urn:li:dataset:(urn:li:dataPlatform:postgres,test.public.foo2,PROD)",
                             scope=AssertionScopeClass.DATASET_ROWS,
-                            dataset="urn:li:dataset:(urn:li:dataPlatform:postgres,test.public.foo2,PROD)",
                             operator="BETWEEN",
                             nativeType="expect_table_row_count_to_be_between",
                             aggregation="ROW_COUNT",
@@ -497,11 +499,16 @@ def test_DataHubValidationAction_pandas(
                     aspectName="assertionInfo",
                     aspect=AssertionInfoClass(
                         customProperties={"expectation_suite_name": "asset.default"},
-                        type="DATASET",
-                        datasetAssertion=DatasetAssertionInfoClass(
-                            dataset="urn:li:dataset:(urn:li:dataPlatform:custom_platefrom,my_df_datasource,PROD)",
+                        type=AssertionTypeClass.CUSTOM,
+                        source=AssertionSourceClass(
+                            type=AssertionSourceTypeClass.EXTERNAL
+                        ),
+                        customAssertion=CustomAssertionInfoClass(
+                            type="greatExpectations",
+                            entity="urn:li:dataset:(urn:li:dataPlatform:custom_platefrom,my_df_datasource,PROD)",
                             scope=AssertionScopeClass.DATASET_COLUMN,
                             operator="NOT_NULL",
+                            field="urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:custom_platefrom,my_df_datasource,PROD),column)",
                             fields=[
                                 "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:custom_platefrom,my_df_datasource,PROD),column)"
                             ],
@@ -565,14 +572,23 @@ def test_DataHubValidationAction_spark(
                     entityUrn="urn:li:assertion:5f0a1761a5e0d1b7acb7ec622f778ebc",
                     aspectName="assertionInfo",
                     aspect=AssertionInfoClass(
-                        type=AssertionTypeClass.DATASET,
+                        type=AssertionTypeClass.CUSTOM,
                         customProperties={"expectation_suite_name": "test_suite"},
-                        datasetAssertion=DatasetAssertionInfoClass(
-                            dataset=(
+                        source=AssertionSourceClass(
+                            type=AssertionSourceTypeClass.EXTERNAL
+                        ),
+                        customAssertion=CustomAssertionInfoClass(
+                            type="greatExpectations",
+                            entity=(
                                 "urn:li:dataset:(urn:li:dataPlatform:custom_platefrom_spark,"
                                 "foobar_spark_df,PROD)"
                             ),
                             scope=AssertionScopeClass.DATASET_COLUMN,
+                            field=(
+                                "urn:li:schemaField:("
+                                "urn:li:dataset:(urn:li:dataPlatform:custom_platefrom_spark,"
+                                "foobar_spark_df,PROD),foo)"
+                            ),
                             fields=[
                                 "urn:li:schemaField:("
                                 "urn:li:dataset:(urn:li:dataPlatform:custom_platefrom_spark,"
@@ -666,7 +682,7 @@ def test_DataHubValidationAction_graceful_failure(
 
 @mock.patch("datahub.emitter.rest_emitter.DatahubRestEmitter.to_graph", autospec=True)
 @mock.patch("datahub.emitter.rest_emitter.DatahubRestEmitter.emit_mcp", autospec=True)
-def test_DataHubValidationAction_existing_assertion_uses_patch(
+def test_DataHubValidationAction_emits_full_assertion_info_upsert(
     mock_emitter: mock.MagicMock,
     mock_to_graph: mock.MagicMock,
     ge_data_context: FileDataContext,
@@ -676,12 +692,13 @@ def test_DataHubValidationAction_existing_assertion_uses_patch(
 ) -> None:
     server_url = "http://localhost:9999"
     mock_graph = mock.Mock()
+    existing_note = AssertionNoteClass(
+        content="keep me",
+        lastModified=AuditStampClass(time=1, actor="urn:li:corpuser:test-user"),
+    )
     mock_graph.get_aspect.return_value = AssertionInfoClass(
         type=AssertionTypeClass.DATASET,
-        note=AssertionNoteClass(
-            content="keep me",
-            lastModified=AuditStampClass(time=1, actor="urn:li:corpuser:test-user"),
-        ),
+        note=existing_note,
     )
     mock_to_graph.return_value = mock_graph
 
@@ -696,22 +713,12 @@ def test_DataHubValidationAction_existing_assertion_uses_patch(
     ) == {"datahub_notification_result": "DataHub notification succeeded"}
 
     first_mcp = mock_emitter.call_args_list[0].args[1]
-    assert isinstance(first_mcp, MetadataChangeProposalClass)
-    assert first_mcp.changeType == ChangeTypeClass.PATCH
-    assert first_mcp.aspectName == "assertionInfo"
-    assert first_mcp.aspect is not None
-    assert first_mcp.aspect.contentType == JSON_PATCH_CONTENT_TYPE
-
-    patch_payload = json.loads(first_mcp.aspect.value.decode())
-    patch_ops = (
-        patch_payload["patch"] if isinstance(patch_payload, dict) else patch_payload
-    )
-    assert {op["path"] for op in patch_ops} == {
-        "/type",
-        "/datasetAssertion",
-        "/customProperties/expectation_suite_name",
-    }
-    assert {op["op"] for op in patch_ops} == {"add"}
+    assert isinstance(first_mcp, MetadataChangeProposalWrapper)
+    assert isinstance(first_mcp.aspect, AssertionInfoClass)
+    assert first_mcp.aspect.type == AssertionTypeClass.CUSTOM
+    assert first_mcp.aspect.customAssertion is not None
+    assert first_mcp.aspect.datasetAssertion is None
+    assert first_mcp.aspect.note == existing_note
 
 
 def test_emit_mode_defaults_to_async_and_coerces_string_override(
